@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Планировщик 24ч</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0D1117">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<!-- Firebase -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+<script>
+firebase.initializeApp({
+  apiKey: "AIzaSyAmzD4GPkgZl1Cg--stsvkn9uzx0idtqf4",
+  authDomain: "my-day-planner-12c77.firebaseapp.com",
+  databaseURL: "https://my-day-planner-12c77-default-rtdb.firebaseio.com",
+  projectId: "my-day-planner-12c77",
+  storageBucket: "my-day-planner-12c77.firebasestorage.app",
+  messagingSenderId: "812145197664",
+  appId: "1:812145197664:web:677f5a1be3a60160d6f905"
+});
+var db = firebase.database();
+</script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+html{overflow-y:scroll;}
+body{background:#0D1117;font-family:'JetBrains Mono','Fira Code','SF Mono','Consolas',monospace;color:#E6EDF3;-webkit-tap-highlight-color:transparent;}
+::-webkit-scrollbar{width:4px;}
+::-webkit-scrollbar-track{background:#161B22;}
+::-webkit-scrollbar-thumb{background:#30363D;border-radius:4px;}
+input[type="date"],input[type="time"]{color-scheme:dark;}
+.sync-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-left:6px;}
+.sync-on{background:#4ECDC4;box-shadow:0 0 6px #4ECDC4;}
+.sync-off{background:#FF6B6B;box-shadow:0 0 6px #FF6B6B;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+var useState=React.useState,useRef=React.useRef,useEffect=React.useEffect,useCallback=React.useCallback;
+
+/* === Firebase sync hook === */
+function useFirebaseState(path, defaultVal) {
+  var s = useState(defaultVal);
+  var val = s[0], setVal = s[1];
+  var fromFB = useRef(false);
+  var ref = useRef(db.ref(path));
+  var initialized = useRef(false);
+
+  useEffect(function() {
+    var r = db.ref(path);
+    ref.current = r;
+    r.on("value", function(snap) {
+      var data = snap.val();
+      fromFB.current = true;
+      if (data !== null) {
+        setVal(data);
+      } else if (!initialized.current) {
+        // First time, no data in Firebase — push defaults
+        r.set(defaultVal);
+      }
+      initialized.current = true;
+    });
+    return function() { r.off(); };
+  }, [path]);
+
+  var setter = useCallback(function(newValOrFn) {
+    setVal(function(prev) {
+      var next = typeof newValOrFn === "function" ? newValOrFn(prev) : newValOrFn;
+      // Write to Firebase
+      ref.current.set(next);
+      return next;
+    });
+  }, []);
+
+  return [val, setter];
+}
+
+function useWindowWidth(){
+  var s=useState(window.innerWidth);
+  useEffect(function(){function h(){s[1](window.innerWidth);}window.addEventListener("resize",h);return function(){window.removeEventListener("resize",h);};},[]);
+  return s[0];
+}
+
+var PALETTE=["#E8A838","#4ECDC4","#FF6B6B","#7C6FE0","#45B7D1","#96CEB4","#F38181","#3DC1D3","#F9ED69","#B8E994","#FDA7DF","#778BEB","#F5CD79","#EA8685","#63CDDA","#CF6A87"];
+
+function polar(cx,cy,r,deg){var a=(deg-90)*Math.PI/180;return{x:cx+r*Math.cos(a),y:cy+r*Math.sin(a)};}
+function arcPath(cx,cy,r,s,e){var a=polar(cx,cy,r,s),b=polar(cx,cy,r,e),sw=e-s;if(sw<0)sw+=360;return"M "+a.x+" "+a.y+" A "+r+" "+r+" 0 "+(sw>180?1:0)+" 1 "+b.x+" "+b.y;}
+function t2a(h,m){return((h*60+m)/1440)*360;}
+function pTime(s){var p=s.split(":");return{h:parseInt(p[0])||0,m:parseInt(p[1])||0};}
+function pad2(v){return String(v).padStart(2,"0");}
+function fmtD(min){var h=Math.floor(min/60),m=min%60;if(h>0)return h+"ч"+(m>0?" "+m+"м":"");return m+"м";}
+function tMin(t){var s=t.startH*60+t.startM,e=t.endH*60+t.endM;if(e<=s)e+=1440;return e-s;}
+function inTask(t,nh,nm){var n=nh*60+nm,s=t.startH*60+t.startM,e=t.endH*60+t.endM;if(e<=s)return n>=s||n<e;return n>=s&&n<e;}
+function daysLeft(d){if(!d)return null;var t=new Date(d),n=new Date();n.setHours(0,0,0,0);t.setHours(0,0,0,0);return Math.ceil((t-n)/864e5);}
+
+function ColorPicker(props){
+  return(<div style={{position:"absolute",zIndex:99,background:"#161B22",border:"1px solid #30363D",borderRadius:8,padding:8,display:"flex",flexWrap:"wrap",gap:4,width:160}}
+    onClick={function(e){e.stopPropagation();}}>
+    {PALETTE.map(function(c){return <div key={c} onClick={function(){props.onChange(c);props.onClose();}}
+      style={{width:24,height:24,borderRadius:4,background:c,cursor:"pointer",border:c===props.color?"2px solid #fff":"2px solid transparent"}}/>;
+    })}
+  </div>);
+}
+
+function PrayerTimes(props){
+  var mob=props.mobile;
+  var def=[{id:"fajr",name:"Фаджр",time:"05:02"},{id:"zuhr",name:"Зухр",time:"12:45"},{id:"asr",name:"Аср",time:"16:55"},{id:"maghrib",name:"Магриб",time:"19:10"},{id:"isha",name:"Иша",time:"20:30"}];
+  var ps=useFirebaseState("prayers",def),prayers=ps[0],setPrayers=ps[1];
+  var es=useState(false),editing=es[0],setEditing=es[1];
+  var ts2=useState(def),tmp=ts2[0],setTmp=ts2[1];
+
+  function openEdit(){setTmp(prayers.map(function(p){return{id:p.id,name:p.name,time:p.time};}));setEditing(true);}
+  function save(){setPrayers(tmp);setEditing(false);}
+  function upd(id,val){setTmp(function(prev){return prev.map(function(p){return p.id===id?{id:p.id,name:p.name,time:val}:p;});});}
+
+  var tInp={background:"#0D1117",border:"1px solid #30363D",borderRadius:4,color:"#E6EDF3",padding:"3px 6px",fontSize:11,fontFamily:"inherit",outline:"none",width:70};
+
+  if(editing){
+    return(
+      <div style={{background:"#161B22",borderRadius:8,padding:"10px 12px",border:"1px solid #21262D",marginTop:8}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:mob?4:8,flexWrap:"wrap"}}>
+          {tmp.map(function(p,i){return(<React.Fragment key={p.id}>
+            <div style={{display:"flex",alignItems:"center",gap:4}}>
+              <span style={{fontSize:mob?9:10,color:"#7D8590"}}>{p.name}</span>
+              <input type="time" value={p.time} onChange={function(e){upd(p.id,e.target.value);}} style={tInp}/>
+            </div>
+            {i<tmp.length-1&&!mob&&<span style={{color:"#30363D",fontSize:12}}>|</span>}
+          </React.Fragment>);})}
+          <button onClick={save} style={{background:"#4ECDC4",color:"#0D1117",border:"none",borderRadius:4,padding:"4px 10px",fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>✓</button>
+          <button onClick={function(){setEditing(false);}} style={{background:"none",border:"1px solid #30363D",borderRadius:4,color:"#7D8590",padding:"4px 8px",fontSize:10,cursor:"pointer",fontFamily:"inherit"}}>✕</button>
+        </div>
+      </div>);
+  }
+
+  var nd=new Date(),nt=nd.getHours()*60+nd.getMinutes(),next=null;
+  for(var ni=0;ni<prayers.length;ni++){var pt=pTime(prayers[ni].time);if(pt.h*60+pt.m>nt){next=prayers[ni].id;break;}}
+
+  return(
+    <div style={{background:"#161B22",borderRadius:8,padding:mob?"6px 10px":"8px 14px",border:"1px solid #21262D",marginTop:8,cursor:"pointer"}} onClick={openEdit}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:0,flexWrap:"wrap"}}>
+        <span style={{fontSize:9,color:"#7D8590",marginRight:mob?6:10}}>🕌</span>
+        {prayers.map(function(p,i){
+          var isN=p.id===next;
+          return(<React.Fragment key={p.id}>
+            <div style={{display:"flex",alignItems:"baseline",gap:3,padding:mob?"2px 4px":"2px 6px",borderRadius:4,background:isN?"#7C6FE020":"transparent"}}>
+              <span style={{fontSize:mob?9:10,color:isN?"#7C6FE0":"#7D8590",fontWeight:isN?700:400}}>{p.name}</span>
+              <span style={{fontSize:mob?10:12,color:isN?"#E6EDF3":"#7D8590",fontWeight:isN?700:400,fontVariantNumeric:"tabular-nums"}}>{p.time}</span>
+            </div>
+            {i<prayers.length-1&&<span style={{color:"#30363D",fontSize:10,margin:"0 1px"}}>|</span>}
+          </React.Fragment>);
+        })}
+        <span style={{fontSize:9,color:"#484F58",marginLeft:6}}>✎</span>
+      </div>
+    </div>);
+}
+
+function ChecklistBoard(props){
+  var title=props.title,icon=props.icon,accent=props.accent,sk=props.storageKey;
+  var is2=useFirebaseState(sk+"/items",props.defaultItems||[]),items=is2[0],setItems=is2[1];
+  var ls=useFirebaseState(sk+"/level",props.initLevel||""),level=ls[0],setLevel=ls[1];
+  var ds=useFirebaseState(sk+"/deadline",props.initDeadline||""),deadline=ds[0],setDeadline=ds[1];
+  var ems=useState(false),editMeta=ems[0],setEditMeta=ems[1];
+  var tls=useState(""),tmpL=tls[0],setTmpL=tls[1];
+  var tds=useState(""),tmpD=tds[0],setTmpD=tds[1];
+  var vs=useState(""),val=vs[0],setVal=vs[1];
+
+  // Ensure items is always an array
+  var safeItems = Array.isArray(items) ? items : [];
+
+  function add(){if(!val.trim())return;setItems(safeItems.concat([{id:Date.now(),text:val.trim(),done:false}]));setVal("");}
+  function toggle(id){setItems(safeItems.map(function(x){return x.id===id?{id:x.id,text:x.text,done:!x.done}:x;}));}
+  function rm(id){setItems(safeItems.filter(function(x){return x.id!==id;}));}
+  var dc=safeItems.filter(function(x){return x.done;}).length;
+  var rem=daysLeft(deadline);
+  var rc=rem===null?"#484F58":rem<=3?"#FF6B6B":rem<=7?"#E8A838":"#4ECDC4";
+  function saveMeta(){setLevel(tmpL);setDeadline(tmpD);setEditMeta(false);}
+  function openEdit(){setTmpL(level);setTmpD(deadline);setEditMeta(true);}
+  var si={background:"#0D1117",border:"1px solid #30363D",borderRadius:4,color:"#E6EDF3",padding:"4px 6px",fontSize:10,fontFamily:"inherit",outline:"none"};
+
+  return(
+    <div style={{background:"#161B22",borderRadius:10,padding:"10px 12px",border:"1px solid #21262D"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+        <div style={{fontSize:9,color:accent,letterSpacing:2,textTransform:"uppercase",fontWeight:700}}>{icon} {title}</div>
+        <span onClick={openEdit} style={{color:"#484F58",fontSize:11,cursor:"pointer"}}>✎</span>
+      </div>
+      {editMeta?(
+        <div style={{display:"flex",gap:4,alignItems:"center",marginBottom:8,flexWrap:"wrap"}}>
+          <input value={tmpL} onChange={function(e){setTmpL(e.target.value);}} placeholder="Уровень" style={Object.assign({},si,{width:80})}/>
+          <input type="date" value={tmpD} onChange={function(e){setTmpD(e.target.value);}} style={Object.assign({},si,{width:120})}/>
+          <button onClick={saveMeta} style={{background:accent,color:"#0D1117",border:"none",borderRadius:4,padding:"4px 8px",fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>✓</button>
+          <button onClick={function(){setEditMeta(false);}} style={{background:"none",border:"1px solid #30363D",borderRadius:4,color:"#7D8590",padding:"4px 6px",fontSize:10,cursor:"pointer",fontFamily:"inherit"}}>✕</button>
+        </div>
+      ):((level||deadline)?(
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,padding:"5px 8px",background:"#0D1117",borderRadius:6,border:"1px solid #21262D"}}>
+          <span style={{fontSize:11,color:accent,fontWeight:600}}>{level||"—"}</span>
+          <span style={{fontSize:11,color:rc,fontWeight:600}}>{rem!==null?(rem>=0?"осталось "+rem+" дн.":"просрочено "+Math.abs(rem)+" дн."):"—"}</span>
+        </div>):null)}
+      <div style={{display:"flex",gap:5,marginBottom:8}}>
+        <input value={val} onChange={function(e){setVal(e.target.value);}} onKeyDown={function(e){if(e.key==="Enter")add();}}
+          placeholder="Задача…" style={{flex:1,background:"#0D1117",border:"1px solid #30363D",borderRadius:5,color:"#E6EDF3",padding:"5px 8px",fontSize:11,fontFamily:"inherit",outline:"none"}}/>
+        <button onClick={add} style={{background:accent,color:"#0D1117",border:"none",borderRadius:5,padding:"0 10px",fontWeight:700,cursor:"pointer",fontFamily:"inherit",fontSize:13}}>+</button>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:3,maxHeight:160,overflowY:"auto"}}>
+        {safeItems.map(function(it){return(
+          <div key={it.id} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 6px",borderRadius:5,background:it.done?"#0D1117":"#1C2333"}}>
+            <div onClick={function(){toggle(it.id);}} style={{width:16,height:16,borderRadius:3,border:"2px solid "+(it.done?accent:"#30363D"),background:it.done?accent+"20":"transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:accent,flexShrink:0}}>{it.done?"✓":""}</div>
+            <span style={{flex:1,fontSize:11,color:it.done?"#484F58":"#E6EDF3",textDecoration:it.done?"line-through":"none"}}>{it.text}</span>
+            <span onClick={function(){rm(it.id);}} style={{color:"#484F58",cursor:"pointer",fontSize:12,padding:"0 2px"}}>✕</span>
+          </div>);})}
+        {safeItems.length===0&&<div style={{fontSize:10,color:"#484F58",textAlign:"center",padding:8}}>Пусто</div>}
+      </div>
+      <div style={{fontSize:9,color:"#484F58",marginTop:6,textAlign:"right"}}>{dc}/{safeItems.length}</div>
+    </div>);
+}
+
+function DayPlanner(){
+  var w=useWindowWidth();
+  var mob=w<800;
+
+  var ns1=useState(new Date()),now=ns1[0],setNow=ns1[1];
+  useEffect(function(){var id=setInterval(function(){setNow(new Date());},1000);return function(){clearInterval(id);};},[]);
+  var nh=now.getHours(),nm=now.getMinutes(),nss=now.getSeconds();
+  var timeStr=pad2(nh)+":"+pad2(nm)+":"+pad2(nss);
+
+  // Firebase connection status
+  var cs=useState(false),connected=cs[0],setConnected=cs[1];
+  useEffect(function(){
+    var connRef=db.ref(".info/connected");
+    connRef.on("value",function(snap){setConnected(!!snap.val());});
+    return function(){connRef.off();};
+  },[]);
+
+  var ts=useFirebaseState("tasks",[
+    {id:1,name:"Сон",startH:22,startM:0,endH:6,endM:0,color:"#4ECDC4"},
+    {id:2,name:"Работа",startH:9,startM:0,endH:18,endM:0,color:"#E8A838"}
+  ]),tasks=ts[0],setTasks=ts[1];
+
+  // Ensure tasks is always an array
+  var safeTasks = Array.isArray(tasks) ? tasks : [];
+
+  var ss=useState(null),selected=ss[0],setSelected=ss[1];
+  var es2=useState(null),editingId=es2[0],setEditingId=es2[1];
+  var eds=useState({}),editData=eds[0],setEditData=eds[1];
+  var cps=useState(null),colorPickerId=cps[0],setColorPickerId=cps[1];
+  var nns=useState(""),newName=nns[0],setNewName=nns[1];
+  var nss2=useState("07:00"),newStart=nss2[0],setNewStart=nss2[1];
+  var nes=useState("08:00"),newEnd=nes[0],setNewEnd=nes[1];
+  var ncs=useState("#FF6B6B"),newColor=ncs[0],setNewColor=ncs[1];
+  var snc=useState(false),showNewColor=snc[0],setShowNewColor=snc[1];
+  var nid=useRef(3);
+
+  var curTask=null;
+  for(var ci=0;ci<safeTasks.length;ci++){if(inTask(safeTasks[ci],nh,nm)){curTask=safeTasks[ci];break;}}
+
+  var countdown="--:--:--";
+  if(curTask){
+    var eM=curTask.endH*60+curTask.endM,nM=nh*60+nm,sM=curTask.startH*60+curTask.startM;
+    if(eM<=sM&&nM>=sM)eM+=1440;if(eM<=nM)eM+=1440;
+    var df=(eM-nM)*60-nss;if(df<0)df=0;
+    countdown=pad2(Math.floor(df/3600))+":"+pad2(Math.floor((df%3600)/60))+":"+pad2(df%60);
+  }
+
+  function addTask(){if(!newName.trim())return;var s=pTime(newStart),e=pTime(newEnd);
+    setTasks(safeTasks.concat([{id:Date.now(),name:newName.trim(),startH:s.h,startM:s.m,endH:e.h,endM:e.m,color:newColor}]));setNewName("");}
+  function rmTask(id){setTasks(safeTasks.filter(function(x){return x.id!==id;}));if(selected===id)setSelected(null);if(editingId===id)setEditingId(null);}
+  function startEdit(t){setEditingId(t.id);setEditData({name:t.name,start:pad2(t.startH)+":"+pad2(t.startM),end:pad2(t.endH)+":"+pad2(t.endM),color:t.color});}
+  function saveEdit(id){var s=pTime(editData.start),e=pTime(editData.end);setTasks(safeTasks.map(function(t){if(t.id===id)return{id:t.id,name:editData.name,startH:s.h,startM:s.m,endH:e.h,endM:e.m,color:editData.color||t.color};return t;}));setEditingId(null);setColorPickerId(null);}
+
+  var dragI=useRef(null),dragO=useRef(null);
+  function dEnd(){if(dragI.current===null||dragO.current===null)return;var c=safeTasks.slice(),d=c.splice(dragI.current,1)[0];c.splice(dragO.current,0,d);setTasks(c);dragI.current=null;dragO.current=null;}
+
+  var totalUsed=0;for(var ti=0;ti<safeTasks.length;ti++)totalUsed+=tMin(safeTasks[ti]);
+  var totalFree=Math.max(0,1440-totalUsed);
+
+  var cx=200,cy=200,R=155,rI=95;
+  var nA=t2a(nh,nm+nss/60);
+  var nOut=polar(cx,cy,R+2,nA),nIn=polar(cx,cy,rI-2,nA);
+  var inp={background:"#0D1117",border:"1px solid #30363D",borderRadius:6,color:"#E6EDF3",padding:"7px 10px",fontSize:mob?12:13,fontFamily:"inherit",outline:"none"};
+
+  var hourEls=[];
+  for(var h=0;h<24;h++){var angle=(h/24)*360,oT=polar(cx,cy,R+4,angle),iT=polar(cx,cy,R+12,angle),lP=polar(cx,cy,R+24,angle);
+    hourEls.push(React.createElement("g",{key:"h"+h},React.createElement("line",{x1:oT.x,y1:oT.y,x2:iT.x,y2:iT.y,stroke:h%6===0?"#7D8590":"#30363D",strokeWidth:h%6===0?1.5:0.7}),
+      React.createElement("text",{x:lP.x,y:lP.y,textAnchor:"middle",dominantBaseline:"central",fill:h%6===0?"#E6EDF3":"#7D8590",fontSize:h%6===0?10:8,fontWeight:h%6===0?700:400},pad2(h))));}
+
+  var arcEls=safeTasks.map(function(t){
+    var a1=t2a(t.startH,t.startM),a2=t2a(t.endH,t.endM);if(a2<=a1)a2+=360;
+    var isSel=selected===t.id,isCur=curTask&&curTask.id===t.id,mR=(R+rI)/2,ww=R-rI-4,sp=a2-a1;
+    var lbl=null;if(sp>=12){var mid=a1+sp/2,p=polar(cx,cy,mR,mid),fs=sp<20?7:sp<35?9:11;
+      lbl=React.createElement("text",{x:p.x,y:p.y,textAnchor:"middle",dominantBaseline:"central",fill:"#0D1117",fontSize:fs,fontWeight:700,style:{pointerEvents:"none"}},t.name.length>8?t.name.slice(0,7)+"…":t.name);}
+    return React.createElement("g",{key:"a"+t.id,onClick:function(){setSelected(isSel?null:t.id);},style:{cursor:"pointer"}},
+      React.createElement("path",{d:arcPath(cx,cy,mR,a1,a2),fill:"none",stroke:t.color,strokeWidth:isSel?ww+8:ww,strokeLinecap:"butt",
+        opacity:selected&&!isSel?0.12:0.85,style:{transition:"all .25s",filter:isSel?"drop-shadow(0 0 10px "+t.color+"90)":isCur?"drop-shadow(0 0 5px "+t.color+"50)":"none"}}),lbl);});
+
+  var dd=new Date();dd.setDate(dd.getDate()+14);var defD=dd.toISOString().split("T")[0];
+
+  var clockSVG=(<svg viewBox="0 0 400 400" style={{width:"100%",maxWidth:mob?320:450,height:"auto"}}>
+    <circle cx={cx} cy={cy} r={R} fill="none" stroke="#161B22" strokeWidth={R-rI}/>
+    <circle cx={cx} cy={cy} r={R} fill="none" stroke="#21262D" strokeWidth={1}/>
+    <circle cx={cx} cy={cy} r={rI} fill="none" stroke="#21262D" strokeWidth={1}/>
+    {arcEls}
+    <line x1={nIn.x} y1={nIn.y} x2={nOut.x} y2={nOut.y} stroke="#FF6B6B" strokeWidth={2} strokeLinecap="round"/>
+    <circle cx={cx} cy={cy} r={4} fill="#FF6B6B"/>
+    {hourEls}
+  </svg>);
+
+  var syncIndicator=(<span className={connected?"sync-dot sync-on":"sync-dot sync-off"} title={connected?"Синхронизировано":"Офлайн"}/>);
+
+  var currentBlock=(<div style={{display:"flex",gap:mob?8:12,marginBottom:mob?12:18}}>
+    <div style={{flex:1,textAlign:"center",padding:mob?"10px":"14px 16px",background:curTask?"#1C2333":"#161B22",borderRadius:8,border:curTask?"1px solid "+curTask.color+"30":"1px solid #21262D"}}>
+      {curTask?(<div><div style={{fontSize:9,color:"#7D8590",letterSpacing:2,textTransform:"uppercase"}}>Сейчас</div>
+        <div style={{fontSize:mob?16:20,fontWeight:700,marginTop:4,color:curTask.color}}>{curTask.name}</div>
+        <div style={{fontSize:11,color:"#7D8590",marginTop:2}}>{pad2(curTask.startH)}:{pad2(curTask.startM)} — {pad2(curTask.endH)}:{pad2(curTask.endM)}</div></div>
+      ):(<div style={{fontSize:12,color:"#484F58",paddingTop:8}}>Нет активной задачи</div>)}
+    </div>
+    <div style={{flex:1,textAlign:"center",padding:mob?"10px":"14px 16px",background:curTask?"#1C2333":"#161B22",borderRadius:8,border:curTask?"1px solid "+curTask.color+"30":"1px solid #21262D"}}>
+      <div style={{fontSize:9,color:"#7D8590",letterSpacing:2,textTransform:"uppercase"}}>Осталось</div>
+      <div style={{fontSize:mob?24:30,fontWeight:700,marginTop:4,color:curTask?"#FF6B6B":"#484F58",fontVariantNumeric:"tabular-nums",letterSpacing:2}}>{countdown}</div>
+      {curTask&&<div style={{fontSize:10,color:"#484F58",marginTop:2}}>до конца задачи</div>}
+    </div>
+  </div>);
+
+  var addForm=(<div style={{background:"#161B22",borderRadius:10,padding:"12px 14px",border:"1px solid #21262D"}}>
+    <div style={{fontSize:10,color:"#7D8590",letterSpacing:2,marginBottom:10,textTransform:"uppercase"}}>Добавить в режим дня</div>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      <div><div style={{fontSize:9,color:"#484F58",marginBottom:3}}>Название</div>
+        <input value={newName} onChange={function(e){setNewName(e.target.value);}} onKeyDown={function(e){if(e.key==="Enter")addTask();}}
+          placeholder="Задача" style={Object.assign({},inp,{width:"100%",boxSizing:"border-box"})}/></div>
+      <div style={{display:"flex",gap:6}}>
+        <div style={{flex:1}}><div style={{fontSize:9,color:"#484F58",marginBottom:3}}>С</div>
+          <input type="time" value={newStart} onChange={function(e){setNewStart(e.target.value);}} style={Object.assign({},inp,{width:"100%",boxSizing:"border-box"})}/></div>
+        <div style={{flex:1}}><div style={{fontSize:9,color:"#484F58",marginBottom:3}}>До</div>
+          <input type="time" value={newEnd} onChange={function(e){setNewEnd(e.target.value);}} style={Object.assign({},inp,{width:"100%",boxSizing:"border-box"})}/></div>
+      </div>
+      <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+        <div style={{position:"relative"}}><div style={{fontSize:9,color:"#484F58",marginBottom:3}}>Цвет</div>
+          <div onClick={function(){setShowNewColor(!showNewColor);}} style={{width:36,height:36,borderRadius:6,background:newColor,cursor:"pointer",border:"2px solid #30363D"}}/>
+          {showNewColor&&<div style={{position:"absolute",bottom:42,left:0,zIndex:50}}><ColorPicker color={newColor} onChange={setNewColor} onClose={function(){setShowNewColor(false);}}/></div>}</div>
+        <button onClick={addTask} style={{flex:1,background:"#E8A838",color:"#0D1117",border:"none",borderRadius:6,padding:"10px 0",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>+ Добавить</button>
+      </div>
+    </div>
+  </div>);
+
+  var taskList=(<div>
+    <div style={{fontSize:10,color:"#7D8590",letterSpacing:2,marginBottom:6,textTransform:"uppercase"}}>Режим дня</div>
+    <div style={{display:"flex",flexDirection:"column",gap:5,maxHeight:mob?9999:400,overflowY:"auto"}}>
+      {safeTasks.map(function(t,i){
+        var isSel=selected===t.id,isCur=curTask&&curTask.id===t.id,isEd=editingId===t.id;
+        return(<div key={t.id} draggable={!isEd}
+          onDragStart={function(){dragI.current=i;}} onDragEnter={function(){dragO.current=i;}} onDragEnd={dEnd} onDragOver={function(e){e.preventDefault();}}
+          onClick={function(){if(!isEd)setSelected(isSel?null:t.id);}}
+          style={{display:"flex",alignItems:"center",gap:6,background:isCur?"#1A2332":isSel?"#1C2333":"#161B22",
+            border:"1px solid "+(isCur?t.color+"50":isSel?t.color+"40":"#21262D"),borderRadius:8,padding:"8px",cursor:isEd?"default":"pointer",transition:"all .2s",
+            boxShadow:isCur?"inset 3px 0 0 "+t.color:"none"}}>
+          <div style={{cursor:"grab",color:"#484F58",fontSize:12,userSelect:"none"}}>≡</div>
+          <div style={{width:3,height:24,borderRadius:2,background:t.color,opacity:isSel||isCur?1:0.5,flexShrink:0}}/>
+          {isEd?(<div style={{flex:1,display:"flex",gap:4,flexWrap:"wrap",alignItems:"center"}} onClick={function(e){e.stopPropagation();}}>
+            <input value={editData.name} onChange={function(e){setEditData(function(d){return Object.assign({},d,{name:e.target.value});});}}
+              onKeyDown={function(e){if(e.key==="Enter")saveEdit(t.id);}} style={Object.assign({},inp,{width:70,flex:"1 1 60px",fontSize:11,padding:"5px 6px"})}/>
+            <input type="time" value={editData.start} onChange={function(e){setEditData(function(d){return Object.assign({},d,{start:e.target.value});});}} style={Object.assign({},inp,{width:75,fontSize:11,padding:"5px 6px"})}/>
+            <input type="time" value={editData.end} onChange={function(e){setEditData(function(d){return Object.assign({},d,{end:e.target.value});});}} style={Object.assign({},inp,{width:75,fontSize:11,padding:"5px 6px"})}/>
+            <div style={{position:"relative"}}>
+              <div onClick={function(){setColorPickerId(colorPickerId===t.id?null:t.id);}}
+                style={{width:24,height:24,borderRadius:4,background:editData.color,cursor:"pointer",border:"1px solid #30363D"}}/>
+              {colorPickerId===t.id&&<div style={{position:"absolute",bottom:30,right:0,zIndex:50}}>
+                <ColorPicker color={editData.color} onChange={function(c){setEditData(function(d){return Object.assign({},d,{color:c});});}} onClose={function(){setColorPickerId(null);}}/></div>}
+            </div>
+            <button onClick={function(){saveEdit(t.id);}} style={{background:"#4ECDC4",color:"#0D1117",border:"none",borderRadius:4,padding:"4px 8px",fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>✓</button>
+            <button onClick={function(){setEditingId(null);setColorPickerId(null);}} style={{background:"none",border:"1px solid #30363D",borderRadius:4,color:"#7D8590",padding:"4px 6px",fontSize:10,cursor:"pointer",fontFamily:"inherit"}}>✕</button>
+          </div>):(<React.Fragment>
+            <div style={{flex:1}}>
+              <div style={{fontSize:12,fontWeight:600,display:"flex",alignItems:"center",gap:4}}>
+                {t.name}
+                {isCur&&<span style={{fontSize:7,background:t.color+"30",color:t.color,padding:"1px 4px",borderRadius:3,fontWeight:700,letterSpacing:1}}>СЕЙЧАС</span>}
+              </div>
+              <div style={{fontSize:10,color:"#7D8590",marginTop:1}}>{pad2(t.startH)}:{pad2(t.startM)} — {pad2(t.endH)}:{pad2(t.endM)}</div>
+            </div>
+            <div style={{fontSize:11,color:t.color,fontWeight:600}}>{fmtD(tMin(t))}</div>
+            <span onClick={function(e){e.stopPropagation();startEdit(t);}} style={{color:"#484F58",fontSize:11,cursor:"pointer",padding:"0 2px"}}>✎</span>
+            <span onClick={function(e){e.stopPropagation();rmTask(t.id);}} style={{color:"#484F58",fontSize:13,cursor:"pointer",padding:"0 2px"}}>✕</span>
+          </React.Fragment>)}
+        </div>);})}
+      {safeTasks.length===0&&<div style={{textAlign:"center",color:"#484F58",padding:16,fontSize:11}}>Добавь задачу</div>}
+    </div>
+  </div>);
+
+  var boards=(<div style={{display:"flex",flexDirection:"column",gap:10}}>
+    <ChecklistBoard title="Alif Bank · Карты" icon="🏦" accent="#E8A838" storageKey="board_bank"
+      defaultItems={[{id:1,text:"Отчёт по картам Visa",done:false},{id:2,text:"Сверка Mastercard",done:false}]} initLevel="Junior" initDeadline={defD}/>
+    <ChecklistBoard title="Data Analytics" icon="📊" accent="#4ECDC4" storageKey="board_study"
+      defaultItems={[{id:1,text:"SQL задачи",done:false},{id:2,text:"Python pandas",done:false}]} initLevel="Уровень 1" initDeadline={defD}/>
+    <ChecklistBoard title="English" icon="🇬🇧" accent="#7C6FE0" storageKey="board_eng"
+      defaultItems={[{id:1,text:"Duolingo 15 мин",done:false},{id:2,text:"Читать статью",done:false}]} initLevel="A1" initDeadline={defD}/>
+  </div>);
+
+  if(mob){
+    return(<div style={{minHeight:"100vh",background:"#0D1117",color:"#E6EDF3",fontFamily:"'JetBrains Mono','Fira Code','SF Mono',monospace",padding:"16px 12px",boxSizing:"border-box"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
+        <div>
+          <div style={{fontSize:9,letterSpacing:2,color:"#7D8590",textTransform:"uppercase",marginBottom:4}}>Планировщик · 24ч {syncIndicator}</div>
+          <div style={{display:"flex",gap:14}}>
+            <div><div style={{fontSize:16,fontWeight:700,color:"#E8A838"}}>{fmtD(totalUsed)}</div><div style={{fontSize:8,color:"#7D8590"}}>ЗАНЯТО</div></div>
+            <div><div style={{fontSize:16,fontWeight:700,color:totalFree>0?"#4ECDC4":"#FF6B6B"}}>{fmtD(totalFree)}</div><div style={{fontSize:8,color:"#7D8590"}}>СВОБОДНО</div></div>
+          </div>
+        </div>
+        <div style={{textAlign:"right"}}>
+          <div style={{fontSize:22,fontWeight:700,letterSpacing:2,fontVariantNumeric:"tabular-nums"}}>{timeStr}</div>
+          <div style={{fontSize:9,color:"#7D8590"}}>{now.toLocaleDateString("ru-RU",{weekday:"short",day:"numeric",month:"short"})}</div>
+        </div>
+      </div>
+      <div style={{display:"flex",justifyContent:"center",marginBottom:4}}>{clockSVG}</div>
+      <PrayerTimes mobile={true}/>
+      <div style={{height:12}}/>
+      {currentBlock}
+      <div style={{marginBottom:12}}>{addForm}</div>
+      <div style={{marginBottom:16}}>{taskList}</div>
+      {boards}
+    </div>);
+  }
+
+  return(<div style={{minHeight:"100vh",background:"#0D1117",color:"#E6EDF3",fontFamily:"'JetBrains Mono','Fira Code','SF Mono',monospace",padding:"20px",boxSizing:"border-box"}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+      <div>
+        <div style={{fontSize:10,letterSpacing:3,color:"#7D8590",textTransform:"uppercase",marginBottom:6}}>Планировщик · 24ч {syncIndicator}</div>
+        <div style={{display:"flex",gap:20}}>
+          <div><div style={{fontSize:20,fontWeight:700,color:"#E8A838"}}>{fmtD(totalUsed)}</div><div style={{fontSize:9,color:"#7D8590",letterSpacing:1}}>ЗАНЯТО</div></div>
+          <div><div style={{fontSize:20,fontWeight:700,color:totalFree>0?"#4ECDC4":"#FF6B6B"}}>{fmtD(totalFree)}</div><div style={{fontSize:9,color:"#7D8590",letterSpacing:1}}>СВОБОДНО</div></div>
+        </div>
+      </div>
+      <div style={{textAlign:"right"}}>
+        <div style={{fontSize:30,fontWeight:700,letterSpacing:2,fontVariantNumeric:"tabular-nums"}}>{timeStr}</div>
+        <div style={{fontSize:10,color:"#7D8590",marginTop:2}}>{now.toLocaleDateString("ru-RU",{weekday:"short",day:"numeric",month:"short"})}</div>
+      </div>
+    </div>
+    <div style={{display:"flex",gap:16,marginBottom:16,alignItems:"flex-start"}}>
+      <div style={{width:260,flexShrink:0}}>{boards}</div>
+      <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center"}}>
+        {clockSVG}
+        <PrayerTimes mobile={false}/>
+      </div>
+      <div style={{width:280,flexShrink:0,display:"flex",flexDirection:"column",gap:10}}>
+        {addForm}
+        {taskList}
+      </div>
+    </div>
+    {currentBlock}
+  </div>);
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(DayPlanner));
+</script>
+</body>
+</html>
