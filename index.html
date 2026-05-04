@@ -10,7 +10,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
-<!-- Firebase -->
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
 <script>
@@ -24,6 +23,29 @@ firebase.initializeApp({
   appId: "1:812145197664:web:677f5a1be3a60160d6f905"
 });
 var db = firebase.database();
+
+// Firebase converts arrays to objects with numeric keys
+// This function converts them back
+function fixFirebaseData(data) {
+  if (data === null || data === undefined) return data;
+  if (typeof data !== "object") return data;
+  // Check if it's an object that should be an array (has numeric keys)
+  var keys = Object.keys(data);
+  var isArray = keys.length > 0 && keys.every(function(k) { return !isNaN(parseInt(k)); });
+  if (isArray) {
+    var arr = [];
+    keys.sort(function(a,b){return parseInt(a)-parseInt(b);}).forEach(function(k) {
+      arr.push(fixFirebaseData(data[k]));
+    });
+    return arr;
+  }
+  // Regular object - recurse into values
+  var result = {};
+  keys.forEach(function(k) {
+    result[k] = fixFirebaseData(data[k]);
+  });
+  return result;
+}
 </script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
@@ -33,7 +55,7 @@ body{background:#0D1117;font-family:'JetBrains Mono','Fira Code','SF Mono','Cons
 ::-webkit-scrollbar-track{background:#161B22;}
 ::-webkit-scrollbar-thumb{background:#30363D;border-radius:4px;}
 input[type="date"],input[type="time"]{color-scheme:dark;}
-.sync-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-left:6px;}
+.sync-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-left:6px;vertical-align:middle;}
 .sync-on{background:#4ECDC4;box-shadow:0 0 6px #4ECDC4;}
 .sync-off{background:#FF6B6B;box-shadow:0 0 6px #FF6B6B;}
 </style>
@@ -43,38 +65,50 @@ input[type="date"],input[type="time"]{color-scheme:dark;}
 <script type="text/babel">
 var useState=React.useState,useRef=React.useRef,useEffect=React.useEffect,useCallback=React.useCallback;
 
-/* === Firebase sync hook === */
+/* === Firebase sync hook (fixed) === */
 function useFirebaseState(path, defaultVal) {
+  var stateRef = useRef(defaultVal);
   var s = useState(defaultVal);
-  var val = s[0], setVal = s[1];
-  var fromFB = useRef(false);
-  var ref = useRef(db.ref(path));
-  var initialized = useRef(false);
+  var val = s[0], setValRaw = s[1];
+  var dbRef = useRef(db.ref(path));
+  var skipNextWrite = useRef(false);
+  var ready = useRef(false);
 
+  function setVal(v) {
+    stateRef.current = v;
+    setValRaw(v);
+  }
+
+  // Listen to Firebase
   useEffect(function() {
     var r = db.ref(path);
-    ref.current = r;
+    dbRef.current = r;
+
     r.on("value", function(snap) {
-      var data = snap.val();
-      fromFB.current = true;
-      if (data !== null) {
-        setVal(data);
-      } else if (!initialized.current) {
-        // First time, no data in Firebase — push defaults
-        r.set(defaultVal);
+      var raw = snap.val();
+      if (raw === null) {
+        // No data in Firebase — write defaults
+        r.set(defaultVal).catch(function(e){ console.error("FB write err:", e); });
+        return;
       }
-      initialized.current = true;
+      var fixed = fixFirebaseData(raw);
+      skipNextWrite.current = true;
+      setVal(fixed);
+      ready.current = true;
+    }, function(err) {
+      console.error("FB read err:", err);
     });
+
     return function() { r.off(); };
   }, [path]);
 
+  // Setter: update state + write to Firebase
   var setter = useCallback(function(newValOrFn) {
-    setVal(function(prev) {
-      var next = typeof newValOrFn === "function" ? newValOrFn(prev) : newValOrFn;
-      // Write to Firebase
-      ref.current.set(next);
-      return next;
-    });
+    var prev = stateRef.current;
+    var next = typeof newValOrFn === "function" ? newValOrFn(prev) : newValOrFn;
+    setVal(next);
+    // Write to Firebase
+    dbRef.current.set(next).catch(function(e){ console.error("FB write err:", e); });
   }, []);
 
   return [val, setter];
@@ -98,6 +132,8 @@ function tMin(t){var s=t.startH*60+t.startM,e=t.endH*60+t.endM;if(e<=s)e+=1440;r
 function inTask(t,nh,nm){var n=nh*60+nm,s=t.startH*60+t.startM,e=t.endH*60+t.endM;if(e<=s)return n>=s||n<e;return n>=s&&n<e;}
 function daysLeft(d){if(!d)return null;var t=new Date(d),n=new Date();n.setHours(0,0,0,0);t.setHours(0,0,0,0);return Math.ceil((t-n)/864e5);}
 
+function toSafeArray(v){return Array.isArray(v)?v:[];}
+
 function ColorPicker(props){
   return(<div style={{position:"absolute",zIndex:99,background:"#161B22",border:"1px solid #30363D",borderRadius:8,padding:8,display:"flex",flexWrap:"wrap",gap:4,width:160}}
     onClick={function(e){e.stopPropagation();}}>
@@ -110,7 +146,7 @@ function ColorPicker(props){
 function PrayerTimes(props){
   var mob=props.mobile;
   var def=[{id:"fajr",name:"Фаджр",time:"05:02"},{id:"zuhr",name:"Зухр",time:"12:45"},{id:"asr",name:"Аср",time:"16:55"},{id:"maghrib",name:"Магриб",time:"19:10"},{id:"isha",name:"Иша",time:"20:30"}];
-  var ps=useFirebaseState("prayers",def),prayers=ps[0],setPrayers=ps[1];
+  var ps=useFirebaseState("prayers",def),prayers=toSafeArray(ps[0]),setPrayers=ps[1];
   var es=useState(false),editing=es[0],setEditing=es[1];
   var ts2=useState(def),tmp=ts2[0],setTmp=ts2[1];
 
@@ -161,7 +197,8 @@ function PrayerTimes(props){
 
 function ChecklistBoard(props){
   var title=props.title,icon=props.icon,accent=props.accent,sk=props.storageKey;
-  var is2=useFirebaseState(sk+"/items",props.defaultItems||[]),items=is2[0],setItems=is2[1];
+  var is2=useFirebaseState(sk+"/items",props.defaultItems||[]),rawItems=is2[0],setItems=is2[1];
+  var items=toSafeArray(rawItems);
   var ls=useFirebaseState(sk+"/level",props.initLevel||""),level=ls[0],setLevel=ls[1];
   var ds=useFirebaseState(sk+"/deadline",props.initDeadline||""),deadline=ds[0],setDeadline=ds[1];
   var ems=useState(false),editMeta=ems[0],setEditMeta=ems[1];
@@ -169,13 +206,10 @@ function ChecklistBoard(props){
   var tds=useState(""),tmpD=tds[0],setTmpD=tds[1];
   var vs=useState(""),val=vs[0],setVal=vs[1];
 
-  // Ensure items is always an array
-  var safeItems = Array.isArray(items) ? items : [];
-
-  function add(){if(!val.trim())return;setItems(safeItems.concat([{id:Date.now(),text:val.trim(),done:false}]));setVal("");}
-  function toggle(id){setItems(safeItems.map(function(x){return x.id===id?{id:x.id,text:x.text,done:!x.done}:x;}));}
-  function rm(id){setItems(safeItems.filter(function(x){return x.id!==id;}));}
-  var dc=safeItems.filter(function(x){return x.done;}).length;
+  function add(){if(!val.trim())return;setItems(items.concat([{id:Date.now(),text:val.trim(),done:false}]));setVal("");}
+  function toggle(id){setItems(items.map(function(x){return x.id===id?{id:x.id,text:x.text,done:!x.done}:x;}));}
+  function rm(id){setItems(items.filter(function(x){return x.id!==id;}));}
+  var dc=items.filter(function(x){return x.done;}).length;
   var rem=daysLeft(deadline);
   var rc=rem===null?"#484F58":rem<=3?"#FF6B6B":rem<=7?"#E8A838":"#4ECDC4";
   function saveMeta(){setLevel(tmpL);setDeadline(tmpD);setEditMeta(false);}
@@ -206,15 +240,15 @@ function ChecklistBoard(props){
         <button onClick={add} style={{background:accent,color:"#0D1117",border:"none",borderRadius:5,padding:"0 10px",fontWeight:700,cursor:"pointer",fontFamily:"inherit",fontSize:13}}>+</button>
       </div>
       <div style={{display:"flex",flexDirection:"column",gap:3,maxHeight:160,overflowY:"auto"}}>
-        {safeItems.map(function(it){return(
+        {items.map(function(it){return(
           <div key={it.id} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 6px",borderRadius:5,background:it.done?"#0D1117":"#1C2333"}}>
             <div onClick={function(){toggle(it.id);}} style={{width:16,height:16,borderRadius:3,border:"2px solid "+(it.done?accent:"#30363D"),background:it.done?accent+"20":"transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:accent,flexShrink:0}}>{it.done?"✓":""}</div>
             <span style={{flex:1,fontSize:11,color:it.done?"#484F58":"#E6EDF3",textDecoration:it.done?"line-through":"none"}}>{it.text}</span>
             <span onClick={function(){rm(it.id);}} style={{color:"#484F58",cursor:"pointer",fontSize:12,padding:"0 2px"}}>✕</span>
           </div>);})}
-        {safeItems.length===0&&<div style={{fontSize:10,color:"#484F58",textAlign:"center",padding:8}}>Пусто</div>}
+        {items.length===0&&<div style={{fontSize:10,color:"#484F58",textAlign:"center",padding:8}}>Пусто</div>}
       </div>
-      <div style={{fontSize:9,color:"#484F58",marginTop:6,textAlign:"right"}}>{dc}/{safeItems.length}</div>
+      <div style={{fontSize:9,color:"#484F58",marginTop:6,textAlign:"right"}}>{dc}/{items.length}</div>
     </div>);
 }
 
@@ -227,21 +261,14 @@ function DayPlanner(){
   var nh=now.getHours(),nm=now.getMinutes(),nss=now.getSeconds();
   var timeStr=pad2(nh)+":"+pad2(nm)+":"+pad2(nss);
 
-  // Firebase connection status
   var cs=useState(false),connected=cs[0],setConnected=cs[1];
-  useEffect(function(){
-    var connRef=db.ref(".info/connected");
-    connRef.on("value",function(snap){setConnected(!!snap.val());});
-    return function(){connRef.off();};
-  },[]);
+  useEffect(function(){var r=db.ref(".info/connected");r.on("value",function(s){setConnected(!!s.val());});return function(){r.off();};},[]);
 
   var ts=useFirebaseState("tasks",[
     {id:1,name:"Сон",startH:22,startM:0,endH:6,endM:0,color:"#4ECDC4"},
     {id:2,name:"Работа",startH:9,startM:0,endH:18,endM:0,color:"#E8A838"}
-  ]),tasks=ts[0],setTasks=ts[1];
-
-  // Ensure tasks is always an array
-  var safeTasks = Array.isArray(tasks) ? tasks : [];
+  ]),rawTasks=ts[0],setTasks=ts[1];
+  var safeTasks=toSafeArray(rawTasks);
 
   var ss=useState(null),selected=ss[0],setSelected=ss[1];
   var es2=useState(null),editingId=es2[0],setEditingId=es2[1];
@@ -252,7 +279,6 @@ function DayPlanner(){
   var nes=useState("08:00"),newEnd=nes[0],setNewEnd=nes[1];
   var ncs=useState("#FF6B6B"),newColor=ncs[0],setNewColor=ncs[1];
   var snc=useState(false),showNewColor=snc[0],setShowNewColor=snc[1];
-  var nid=useRef(3);
 
   var curTask=null;
   for(var ci=0;ci<safeTasks.length;ci++){if(inTask(safeTasks[ci],nh,nm)){curTask=safeTasks[ci];break;}}
@@ -298,6 +324,8 @@ function DayPlanner(){
 
   var dd=new Date();dd.setDate(dd.getDate()+14);var defD=dd.toISOString().split("T")[0];
 
+  var syncIndicator=(<span className={connected?"sync-dot sync-on":"sync-dot sync-off"} title={connected?"Синхронизировано":"Офлайн"}/>);
+
   var clockSVG=(<svg viewBox="0 0 400 400" style={{width:"100%",maxWidth:mob?320:450,height:"auto"}}>
     <circle cx={cx} cy={cy} r={R} fill="none" stroke="#161B22" strokeWidth={R-rI}/>
     <circle cx={cx} cy={cy} r={R} fill="none" stroke="#21262D" strokeWidth={1}/>
@@ -307,8 +335,6 @@ function DayPlanner(){
     <circle cx={cx} cy={cy} r={4} fill="#FF6B6B"/>
     {hourEls}
   </svg>);
-
-  var syncIndicator=(<span className={connected?"sync-dot sync-on":"sync-dot sync-off"} title={connected?"Синхронизировано":"Офлайн"}/>);
 
   var currentBlock=(<div style={{display:"flex",gap:mob?8:12,marginBottom:mob?12:18}}>
     <div style={{flex:1,textAlign:"center",padding:mob?"10px":"14px 16px",background:curTask?"#1C2333":"#161B22",borderRadius:8,border:curTask?"1px solid "+curTask.color+"30":"1px solid #21262D"}}>
